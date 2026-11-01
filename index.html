@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  <title>Battleship — Two Players, One Device</title>
+  <meta name="description" content="Classic Battleship game for two players on one device. Clean, colorful 2D arcade naval combat with cloaked fleets and zero scrolling.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css?v=arcade_v6_final">
+</head>
+<body data-p="0">
+  <main id="app" class="game-app" role="main">
+    <header id="top-bar" class="top-bar" role="banner">
+      <div class="top-bar-slot top-bar-left">
+        <button id="mute" class="mute" type="button" aria-pressed="false" aria-label="Sound on" title="Toggle sound">🔊</button>
+      </div>
+      <div id="top-bar-center" class="top-bar-center"></div>
+      <div class="top-bar-slot top-bar-right">
+        <button id="exit-tab" class="exit-tab exit-btn" type="button" aria-label="Exit match">EXIT</button>
+      </div>
+    </header>
+    <div id="screen-content" class="screen-content">
+      <noscript>Battleship needs JavaScript enabled to run.</noscript>
+    </div>
+  </main>
+  <div id="modal-container"></div>
+  <script src="script.js?v=arcade_v6_final"></script>
+</body>
+</html>
