@@ -1531,7 +1531,7 @@ body[data-p="1"] .ship-btn.selected,
   100% { opacity: 0; transform: translate(-50%, -55%) scale(0.95); visibility: hidden; }
 }
 
-/* Callouts (Hit / Miss / Sunk) */
+/* Callouts (Sunk & Incoming Alerts) */
 .callout {
   position: absolute;
   top: 50%;
@@ -1572,16 +1572,13 @@ body[data-p="1"] .ship-btn.selected,
   box-sizing: border-box;
 }
 
-.callout.hit .callout-box,
 .callout.sunk .callout-box,
-.callout.in-hit .callout-box,
 .callout.in-sunk .callout-box {
   background: rgba(26, 14, 20, 0.94);
   border: 1.5px solid rgba(255, 82, 82, 0.6);
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6), 0 0 18px rgba(255, 82, 82, 0.35);
 }
 
-.callout.miss .callout-box,
 .callout.in-miss .callout-box {
   background: rgba(14, 24, 38, 0.94);
   border: 1.5px solid rgba(56, 189, 248, 0.6);
@@ -1606,14 +1603,11 @@ body[data-p="1"] .ship-btn.selected,
   word-break: break-word;
 }
 
-.callout.hit .callout-title,
 .callout.sunk .callout-title,
-.callout.in-hit .callout-title,
 .callout.in-sunk .callout-title {
   color: #FF5252;
 }
 
-.callout.miss .callout-title,
 .callout.in-miss .callout-title {
   color: #38BDF8;
 }
@@ -1693,3 +1687,41 @@ body[data-p="1"] .ship-btn.selected,
     transition-duration: 0.01ms !important;
   }
 }
+
+
+/* ==========================================================================
+   PLAY WITH BOT — menu buttons, bot badge
+   ========================================================================== */
+.menu-buttons {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  max-width: 320px;
+}
+.menu-buttons .btn {
+  width: 100%;
+  white-space: nowrap;
+}
+body[data-p] .badge.bot {
+  background: var(--coral-orange);
+  color: #3D0F0A;
+  box-shadow: 0 0 0 4px rgba(247, 149, 121, 0.3);
+  font-size: 1.35rem;
+}
+body[data-p] .badge.xl.bot { font-size: 2.2rem; }
+
+/* Short landscape phones: put the two menu buttons side by side so the menu never scrolls */
+@media (orientation: landscape) and (max-height: 480px) {
+  .menu-buttons { flex-direction: row; max-width: none; gap: 10px; }
+  .menu-buttons .btn { flex: 1; font-size: 0.95rem; padding: 8px 10px; }
+  .menu-ship-icon { font-size: 2rem; margin-bottom: 0; }
+  .menu-tagline { margin-bottom: 10px; }
+  .menu-quick-rules { margin-top: 10px; }
+}
+@media (max-width: 320px) {
+  .menu-buttons .btn { font-size: 0.95rem; padding: 9px 10px; }
+}
+
+/* Keep the turn pill on one line ("BOT TURN" / "YOUR TURN") */
+.your-turn-text { white-space: nowrap; }

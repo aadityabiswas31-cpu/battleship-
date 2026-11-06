@@ -75,6 +75,41 @@ function randomFleet() {
   return ships;
 }
 
+/* ---------- Bot AI (probability-density hunt / target) ----------
+   The bot only ever "sees" what a human opponent would: its own shot results
+   (hit / miss) and which ship it just sank. It never reads the human fleet.
+   For every shot it scores each square by how many ways the still-afloat ships
+   could fit through it. Squares next to unresolved hits score far higher, so
+   it hunts efficiently and then finishes off a ship once it finds one. */
+const bot = {
+  sunk: [],
+  reset() { this.sunk = []; },
+  note(res) { if (res.sunk && res.ship) this.sunk.push(res.ship); },
+  pickShot(shots) {
+    const sunkCells = new Set(this.sunk.flatMap(s => s.cells));
+    const afloat = SHIPS.filter(def => !this.sunk.some(s => s.name === def.name));
+    const score = new Array(TOTAL_CELLS).fill(0);
+    for (const def of afloat) {
+      for (const horizontal of [true, false]) {
+        for (let start = 0; start < TOTAL_CELLS; start++) {
+          const cells = shipCells(start, def.size, horizontal);
+          if (!cells || cells.some(c => shots[c] === 'miss' || sunkCells.has(c))) continue;
+          const live = cells.filter(c => shots[c] === 'hit').length;
+          const w = live ? 10 * Math.pow(4, live) : 1;
+          for (const c of cells) if (!shots[c]) score[c] += w;
+        }
+      }
+    }
+    let best = -1, pool = [];
+    for (let i = 0; i < TOTAL_CELLS; i++) {
+      if (shots[i]) continue;
+      if (score[i] > best) { best = score[i]; pool = [i]; }
+      else if (score[i] === best) pool.push(i);
+    }
+    return pool[Math.floor(Math.random() * pool.length)];
+  }
+};
+
 /* ---------- WebAudio (Synthesized Arcade Audio) ---------- */
 let muted = false, ac = null;
 function ctx() {
@@ -123,6 +158,7 @@ const sfx = {
   hit: () => { noise(0.5, 0.35, 600, 0.05); tone(110, 0.45, 'sawtooth', 0.18, 0.05, -50); },
   sunk: () => { sfx.hit(); [440, 330, 220, 160].forEach((f, k) => tone(f, 0.25, 'triangle', 0.15, 0.35 + k * 0.15)); },
   win: () => [523, 659, 784, 1047].forEach((f, k) => tone(f, 0.3, 'triangle', 0.18, k * 0.15)),
+  lose: () => [440, 392, 330, 262].forEach((f, k) => tone(f, 0.3, 'triangle', 0.16, k * 0.18)),
   ready: () => tone(660, 0.1, 'triangle', 0.1),
 };
 
@@ -236,6 +272,18 @@ const MISS_DELAY_MS = 1000;
 let missDelayTimer = null;
 let pendingMissTransition = null;
 
+/* Bot pacing */
+const BOT_THINK_MS = 1100;
+const BOT_FOLLOWUP_MS = 1300;
+let botTimer = null;
+
+function clearBotTimer() {
+  if (botTimer) {
+    clearTimeout(botTimer);
+    botTimer = null;
+  }
+}
+
 function clearMissDelay() {
   if (missDelayTimer) {
     clearTimeout(missDelayTimer);
@@ -280,8 +328,12 @@ let state = freshState();
 function freshState() {
   clearMissDelay();
   clearTurnNotification();
+  clearBotTimer();
+  bot.reset();
   return {
     screen: S.MENU,
+    vsBot: false,
+    botTurn: false,
     player: 0,
     fleets: [null, null],
     draft: { ships: [], selected: 0, horizontal: true },
@@ -305,13 +357,15 @@ function freshState() {
   };
 }
 
-const name = p => `Player ${p + 1}`;
+const name = p => (state.vsBot && p === 1) ? 'Bot' : `Player ${p + 1}`;
+const poss = p => state.vsBot ? (p === 1 ? "Bot's" : 'Your') : `${name(p)}'s`;
 const firstFree = () => SHIPS.findIndex(s => !state.draft.ships.some(d => d.name === s.name));
 const resetDraft = () => { state.draft = { ships: [], selected: 0, horizontal: true }; state.msg = ''; };
 
 /* ---------- Actions ---------- */
-function startGame() {
+function startGame(vsBot) {
   state = freshState();
+  state.vsBot = vsBot === true;
   state.screen = S.PLACE;
   sfx.ready();
   render();
@@ -339,6 +393,27 @@ function finishPlacement() {
   const p = state.player;
   if (state.screen !== S.PLACE || state.draft.ships.length !== SHIPS.length) return;
   state.fleets[p] = state.draft.ships;
+  if (state.vsBot) {
+    // Single-player: the bot hides its fleet at random and the human fires first.
+    // No privacy hand-off is needed because only one person is holding the device.
+    state.fleets[1] = randomFleet();
+    bot.reset();
+    resetDraft();
+    state.screen = S.TURN;
+    state.player = 0;
+    state.botTurn = false;
+    state.turnDone = false;
+    state.transitioning = false;
+    state.target = null;
+    state.fx = null;
+    state.last = null;
+    state.msg = '';
+    state.msgKind = '';
+    showTurnNotification(0);
+    sfx.ready();
+    render();
+    return;
+  }
   if (p === 0) {
     goPrivacy(
       { screen: S.PLACE, player: 1 },
@@ -382,7 +457,8 @@ function confirmReady() {
 
   const l = state.last;
   if (state.screen === S.TURN && l && l.by !== state.player) {
-    state.fx = { kind: l.sunk ? 'in-sunk' : l.hit ? 'in-hit' : 'in-miss', ship: l.ship, cell: l.cell, by: l.by };
+    const k = l.sunk ? 'in-sunk' : l.hit ? null : 'in-miss';
+    state.fx = k ? { kind: k, ship: l.ship, cell: l.cell, by: l.by } : null;
     (l.hit ? (l.sunk ? sfx.sunk : sfx.hit) : sfx.miss)();
     if (l.hit) buzz(200);
   } else {
@@ -392,7 +468,7 @@ function confirmReady() {
 }
 
 function selectTarget(i) {
-  if (state.screen !== S.TURN || state.turnDone) return;
+  if (state.screen !== S.TURN || state.turnDone || state.botTurn) return;
   if (state.transitioning) {
     flushMissTransition();
     return;
@@ -410,7 +486,7 @@ function selectTarget(i) {
 
 function attack(cell) {
   const p = state.player, d = 1 - p;
-  if (state.screen !== S.TURN || state.turnDone || state.transitioning) return;
+  if (state.screen !== S.TURN || state.turnDone || state.transitioning || state.botTurn) return;
   const res = resolveAttack(state.fleets[d], state.shots[d], cell);
   if (!res.ok) {
     state.msg = res.reason;
@@ -425,7 +501,7 @@ function attack(cell) {
   const kind = res.sunk ? 'sunk' : res.hit ? 'hit' : 'miss';
   state.msg = `${coord(cell)}: ` + (res.sunk ? `Hit! You sank their ${res.ship.name}!` : res.hit ? `Hit! You struck a ship!` : `Miss — only open ocean.`);
   state.msgKind = kind;
-  state.fx = { kind, ship: res.ship && res.ship.name, cell };
+  state.fx = res.sunk ? { kind: 'sunk', ship: res.ship && res.ship.name, cell } : null;
 
   sfx.fire();
   (res.hit ? (res.sunk ? sfx.sunk : sfx.hit) : sfx.miss)();
@@ -455,6 +531,10 @@ function attack(cell) {
       pendingMissTransition = null;
       missDelayTimer = null;
       if (state.screen !== S.TURN) return;
+      if (state.vsBot) {
+        startBotTurn();
+        return;
+      }
       state.turnDone = false;
       state.transitioning = false;
       state.player = d;
@@ -466,6 +546,71 @@ function attack(cell) {
       render();
     };
     missDelayTimer = setTimeout(pendingMissTransition, MISS_DELAY_MS);
+  }
+}
+
+/* ---------- Bot Turn ---------- */
+function startBotTurn() {
+  clearBotTimer();
+  state.turnDone = false;
+  state.transitioning = false;
+  state.botTurn = true;
+  state.target = null;
+  state.fx = null;
+  state.sideMessage = null;
+  state.msg = '';
+  state.msgKind = '';
+  showTurnNotification(1);
+  sfx.ready();
+  render();
+  botTimer = setTimeout(botFire, BOT_THINK_MS);
+}
+
+function botFire() {
+  botTimer = null;
+  if (state.screen !== S.TURN || !state.vsBot || !state.botTurn) return;
+
+  const shots = state.shots[0];
+  let cell = bot.pickShot(shots);
+  let res = resolveAttack(state.fleets[0], shots, cell);
+  if (!res.ok) {
+    // Safety net: fall back to any untouched square
+    const open = [];
+    for (let i = 0; i < TOTAL_CELLS; i++) if (!shots[i]) open.push(i);
+    if (!open.length) return;
+    cell = open[Math.floor(Math.random() * open.length)];
+    res = resolveAttack(state.fleets[0], shots, cell);
+    if (!res.ok) return;
+  }
+
+  bot.note(res);
+  state.stats[1][res.hit ? 'hits' : 'misses']++;
+  state.last = { by: 1, cell, hit: res.hit, ship: res.ship && res.ship.name, sunk: res.sunk };
+  const k = res.sunk ? 'in-sunk' : res.hit ? null : 'in-miss';
+  state.fx = k ? { kind: k, ship: state.last.ship, cell, by: 1 } : null;
+  state.msg = '';
+  state.msgKind = '';
+
+  sfx.fire();
+  (res.hit ? (res.sunk ? sfx.sunk : sfx.hit) : sfx.miss)();
+  if (res.hit) buzz(200);
+
+  if (res.allSunk) {
+    clearTurnNotification();
+    state.botTurn = false;
+    state.winner = 1;
+    state.screen = S.OVER;
+    setTimeout(sfx.lose, 700);
+    render();
+  } else if (res.hit) {
+    // Direct hit = the bot strikes again
+    render();
+    botTimer = setTimeout(botFire, BOT_FOLLOWUP_MS);
+  } else {
+    // Miss = control returns to the human
+    state.botTurn = false;
+    showTurnNotification(0);
+    render();
   }
 }
 
@@ -584,7 +729,10 @@ function el(tag, props = {}, ...kids) {
   return n;
 }
 
-const badge = (p, xl) => el('div', { class: 'badge' + (xl ? ' xl' : ''), 'aria-hidden': 'true', text: `P${p + 1}` });
+const badge = (p, xl) => {
+  const isBot = state.vsBot && p === 1;
+  return el('div', { class: 'badge' + (xl ? ' xl' : '') + (isBot ? ' bot' : ''), 'aria-hidden': 'true', text: isBot ? '🤖' : `P${p + 1}` });
+};
 
 /* Exit Confirmation Modal */
 function exitModal() {
@@ -665,10 +813,7 @@ function healthList(ships, shots, own) {
 }
 
 const FX = {
-  hit: ['💥', 'DIRECT HIT!', 'Target hit at sector '],
-  miss: ['💧', 'SPLASH — MISS', 'No vessel located at sector '],
   sunk: ['🔥', 'SHIP SUNK!', 'You destroyed their '],
-  'in-hit': ['⚠️', 'YOUR SHIP WAS HIT!', ''],
   'in-sunk': ['💀', 'SHIP LOST!', ''],
   'in-miss': ['🌊', 'ENEMY MISSED', ''],
 };
@@ -677,8 +822,6 @@ function callout(fx) {
   const [icon, title, sub0] = FX[fx.kind];
   let sub = sub0;
   if (fx.kind === 'sunk') sub += fx.ship + '!';
-  else if (fx.kind === 'hit' || fx.kind === 'miss') sub += coord(fx.cell);
-  else if (fx.kind === 'in-hit') sub = `${name(fx.by)} hit your ${fx.ship} at ${coord(fx.cell)}`;
   else if (fx.kind === 'in-sunk') sub = `${name(fx.by)} sank your ${fx.ship} at ${coord(fx.cell)}`;
   else if (fx.kind === 'in-miss') sub = `${name(fx.by)} fired at ${coord(fx.cell)} and missed`;
 
@@ -694,6 +837,7 @@ function callout(fx) {
 /* "YOUR TURN" HUD Overlay */
 function yourTurnOverlay(playerIndex) {
   const isP1 = playerIndex === 0;
+  const isBot = state.vsBot && playerIndex === 1;
   return el('div', {
     class: 'your-turn-hud ' + (isP1 ? 'p1-turn' : 'p2-turn'),
     id: 'your-turn-overlay',
@@ -702,8 +846,8 @@ function yourTurnOverlay(playerIndex) {
     'aria-live': 'polite',
     role: 'status'
   },
-    el('span', { class: 'your-turn-icon', 'aria-hidden': 'true', text: isP1 ? '⚓' : '⚡' }),
-    el('span', { class: 'your-turn-text', text: 'YOUR TURN' })
+    el('span', { class: 'your-turn-icon', 'aria-hidden': 'true', text: isBot ? '🤖' : isP1 ? '⚓' : '⚡' }),
+    el('span', { class: 'your-turn-text', text: isBot ? 'BOT TURN' : 'YOUR TURN' })
   );
 }
 
@@ -718,14 +862,17 @@ function menuScreen() {
     el('div', { class: 'menu-center-box' },
       el('span', { class: 'menu-ship-icon', 'aria-hidden': 'true', text: '🚢' }),
       el('h1', { id: 'ttl', tabindex: '-1', class: 'menu-title', text: 'BATTLESHIP' }),
-      el('p', { class: 'menu-tagline', text: 'TWO PLAYERS • ONE DEVICE • 2D NAVAL COMBAT' }),
-      el('button', { class: 'btn primary big glow', id: 'new-game', onclick: startGame, text: 'START MATCH' }),
+      el('p', { class: 'menu-tagline', text: 'PLAY A FRIEND OR FACE THE BOT' }),
+      el('div', { class: 'menu-buttons' },
+        el('button', { class: 'btn primary big glow', id: 'new-game', onclick: () => startGame(false), text: '👥 2 PLAYERS' }),
+        el('button', { class: 'btn action-blue big', id: 'play-bot', onclick: () => startGame(true), text: '🤖 PLAY WITH BOT' })
+      ),
       el('div', { class: 'menu-quick-rules' },
         el('span', { text: '⚓ Hidden Fleet Placement' }),
         el('span', { class: 'dot-sep', text: '•' }),
         el('span', { text: '💥 Direct Hit = Strike Again' }),
         el('span', { class: 'dot-sep', text: '•' }),
-        el('span', { text: '💧 Miss = Pass Device' })
+        el('span', { text: '💧 Miss = Turn Passes' })
       )
     )
   );
@@ -1066,7 +1213,7 @@ function battleScreen() {
       },
         el('div', { class: 'board-top-label target-label' },
           el('span', { class: 'grid-status-badge active', text: '🎯 TARGET' }),
-          el('h2', { id: 'target-board-heading', text: `${name(k)}'s Fleet` })
+          el('h2', { id: 'target-board-heading', text: `${poss(k)} Fleet` })
         ),
         aimBoard,
         healthList(enemyFleet, enemyShots, false)
@@ -1086,7 +1233,7 @@ function battleScreen() {
       },
         el('div', { class: 'board-top-label defense-label' },
           el('span', { class: 'grid-status-badge inactive', text: '🚢 DEFENSE' }),
-          el('h2', { id: 'defense-board-heading', text: `${name(k)}'s Radar` })
+          el('h2', { id: 'defense-board-heading', text: `${poss(k)} Radar` })
         ),
         defBoard,
         healthList(myFleet, myShots, true)
@@ -1121,20 +1268,22 @@ function battleScreen() {
 
 /* 5. Game Over Screen */
 function gameOverScreen() {
-  const w = state.winner, shots = state.stats[w].hits + state.stats[w].misses;
+  const w = state.winner, sp = state.vsBot ? 0 : w;   // vs Bot: always show the human's stats
+  const shots = state.stats[sp].hits + state.stats[sp].misses;
+  const botWon = state.vsBot && w === 1;
   return el('section', { class: 'screen winner center-screen', 'aria-labelledby': 'ttl' },
     state.confirmExit && exitModal(),
     el('div', { class: 'winner-card' },
-      el('span', { class: 'trophy', 'aria-hidden': 'true', text: '🏆' }),
-      el('h1', { id: 'ttl', tabindex: '-1', text: `${name(w).toUpperCase()} WINS!` }),
-      el('p', { class: 'sub', id: 'final', text: `All 5 enemy ships have been sunk.` }),
+      el('span', { class: 'trophy', 'aria-hidden': 'true', text: botWon ? '🤖' : '🏆' }),
+      el('h1', { id: 'ttl', tabindex: '-1', text: state.vsBot ? (botWon ? 'BOT WINS!' : 'YOU WIN!') : `${name(w).toUpperCase()} WINS!` }),
+      el('p', { class: 'sub', id: 'final', text: botWon ? 'Your entire fleet was sunk. Ready for a rematch?' : 'All 5 enemy ships have been sunk.' }),
       el('div', { class: 'stats', style: 'display:flex;justify-content:center;gap:12px;margin:16px 0;' },
         el('span', { class: 'chip', text: `Shots: ${shots}` }),
-        el('span', { class: 'chip', text: `Hits: ${state.stats[w].hits}` }),
-        el('span', { class: 'chip', text: `Accuracy: ${shots ? Math.round(100 * state.stats[w].hits / shots) : 0}%` })
+        el('span', { class: 'chip', text: `Hits: ${state.stats[sp].hits}` }),
+        el('span', { class: 'chip', text: `Accuracy: ${shots ? Math.round(100 * state.stats[sp].hits / shots) : 0}%` })
       ),
       el('div', { class: 'row', style: 'display:flex;justify-content:center;margin-top:16px;gap:12px;' },
-        el('button', { class: 'btn primary big glow', id: 'play-again', onclick: startGame, text: 'Play Again' }),
+        el('button', { class: 'btn primary big glow', id: 'play-again', onclick: () => startGame(state.vsBot), text: 'Play Again' }),
         el('button', { class: 'btn sm', id: 'to-menu', onclick: () => { state = freshState(); render(); }, text: 'Main Menu' })
       )
     )
@@ -1169,7 +1318,7 @@ function renderTopBar() {
     topBarCenter.append(
       el('div', { class: 'top-bar-title-row' },
         badge(p),
-        el('h1', { id: 'ttl', tabindex: '-1', text: `${name(p)}: Place Your Fleet` }),
+        el('h1', { id: 'ttl', tabindex: '-1', text: state.vsBot ? 'Place Your Fleet' : `${name(p)}: Place Your Fleet` }),
         el('span', { class: 'chip sm' }, el('span', { text: `Ships placed: ${draft.ships.length}/5` }))
       ),
       el('div', { class: 'top-bar-sub', text: 'Select a ship, rotate with (R), then click a square to station.' })
@@ -1188,17 +1337,27 @@ function renderTopBar() {
     const myLeftCount = myFleet.filter(s => !isSunk(s, myShots)).length;
     const enemyLeftCount = enemyFleet.length - sunkEnemyCount;
 
+    const botTurn = state.vsBot && state.botTurn;
     let status = state.msg;
     if (!status) {
-      status = l && l.by === d
-        ? `${name(d)} fired at ${coord(l.cell)}: ` + (l.sunk ? `your ${l.ship} was SUNK!` : l.hit ? `your ${l.ship} was HIT!` : 'missed.') + ` Your turn to attack, ${name(p)}!`
-        : `${name(p)}, select target coordinates on ${name(d)}'s board.`;
+      if (state.vsBot) {
+        if (l && l.by === 1) {
+          const outcome = l.sunk ? `your ${l.ship} was SUNK!` : l.hit ? `your ${l.ship} was HIT!` : 'missed.';
+          status = `Bot fired at ${coord(l.cell)}: ${outcome}` + (botTurn ? (l.hit ? ' Bot fires again…' : '') : ' Your turn to attack!');
+        } else {
+          status = botTurn ? 'Bot is aiming…' : "Select a target on the Bot's board.";
+        }
+      } else {
+        status = l && l.by === d
+          ? `${name(d)} fired at ${coord(l.cell)}: ` + (l.sunk ? `your ${l.ship} was SUNK!` : l.hit ? `your ${l.ship} was HIT!` : 'missed.') + ` Your turn to attack, ${name(p)}!`
+          : `${name(p)}, select target coordinates on ${name(d)}'s board.`;
+      }
     }
 
     topBarCenter.append(
       el('div', { class: 'top-bar-title-row' },
-        badge(p),
-        el('h1', { id: 'ttl', tabindex: '-1', text: `${name(p)}'s Turn` })
+        badge(botTurn ? 1 : p),
+        el('h1', { id: 'ttl', tabindex: '-1', text: state.vsBot ? (botTurn ? "Bot's Turn" : 'Your Turn') : `${name(p)}'s Turn` })
       ),
       el('div', { class: 'top-bar-status-row' },
         el('div', { class: 'status-inline s-' + state.msgKind, id: 'status', role: 'status', 'aria-live': 'polite', text: status })
@@ -1397,6 +1556,10 @@ if (typeof window !== 'undefined') {
     confirmReady,
     flushMissTransition,
     clearMissDelay,
+    startBotTurn,
+    botFire,
+    BOT_THINK_MS,
+    BOT_FOLLOWUP_MS,
     MISS_DELAY_MS,
     showTurnNotification,
     clearTurnNotification,
@@ -1414,6 +1577,7 @@ if (typeof window !== 'undefined') {
     isSunk,
     coord,
     randomFleet,
+    bot,
     SHIPS,
     COLS_COUNT,
     ROWS_COUNT,
